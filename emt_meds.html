@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>El Paso EMT Meds – Searchable Archive</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.35; }
+    header { display:flex; gap: 12px; align-items:center; flex-wrap: wrap; }
+    input[type="search"] { width: min(720px, 100%); padding: 10px 12px; font-size: 16px; }
+    button { padding: 10px 12px; font-size: 14px; cursor:pointer; }
+    .meta { color:#555; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+    .name { font-weight: 700; font-size: 18px; margin-bottom: 6px; }
+    details { margin-top: 8px; }
+    summary { cursor:pointer; font-weight: 600; }
+    .tagrow { display:flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .tag { border: 1px solid #eee; background:#fafafa; padding: 4px 8px; border-radius: 999px; font-size: 12px; color:#333; }
+    .small { font-size: 13px; color:#333; white-space: pre-wrap; }
+    .footer { margin-top: 20px; color:#666; font-size: 12px; }
+    .warn { background: #fff7e6; border: 1px solid #ffe1a6; padding: 10px 12px; border-radius: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:0">El Paso EMT Meds – Searchable Archive</h2>
+    <span class="meta" id="status">Loading…</span>
+  </header>
+
+  <p class="warn">
+    This is a searchable reference built from your uploaded quick guide. Always follow your agency’s current protocols/medical direction.
+  </p>
+
+  <input id="q" type="search" placeholder="Search: acetaminophen, anaphylaxis, dose, contraindication, etc…" autocomplete="off" />
+  <div class="tagrow">
+    <span class="tag">Offline</span>
+    <span class="tag">IndexedDB</span>
+    <span class="tag">Fast search</span>
+  </div>
+
+  <div class="grid" id="results"></div>
+
+  <div class="footer">
+    Source: “El Paso EMT Medication Guidelines – Quick Guide (Updated 02/13/2025)”.
+  </div>
+
+<script>
+/**
+ * Minimal, fast local archive:
+ * - On first load: seeds IndexedDB with meds.
+ * - Every load: searches from IndexedDB and renders cards.
+ */
+
+const DB_NAME = "emt_meds_archive";
+const DB_VERSION = 1;
+const STORE = "meds";
+
+// Data seeded from the user’s PDF quick guide (Updated 02/13/2025)
+const SEED = [
+  {
+    id: "acetaminophen",
+    name: "Acetaminophen (Tylenol)",
+    description: "Acts centrally in the brain; increases pain threshold through COX pathways. Antipyretic effects by blocking pyrogens in hypothalamic thermoregulatory centers.",
+    onset: "15–20 min",
+    duration: "4–6 hours",
+    indications: ["Mild to moderate pain", "Headaches/migraines", "Fever"],
+    contraindications: ["Hypersensitivity to drug", "Hepatic impairment/failure", "Suicide attempt"],
+    adverseEffects: ["Stevens-Johnson syndrome", "Angioedema", "Oliguria", "Pulmonary edema", "Transient hypotension if administered rapid IV"],
+    dosage: [
+      "Adult: 500–1,000 mg PO. PRN every 6 hours.",
+      "Pediatric: 15 mg/kg PO. Max single dose 750 mg."
+    ],
+    special: [
+      "Consider other meds containing acetaminophen. Max daily adult dose = 4,000 mg. Max daily pediatric dose = 60 mg/kg.",
+      "Chronic alcoholic has higher risk of hepatotoxicity."
+    ]
+  },
+  {
+    id: "albuterol",
+    name: "Albuterol Sulfate",
+    description: "Selective β-2 adrenergic receptor agonist; bronchodilator and positive chronotrope. β agonist lowers serum potassium (temporary treatment for unstable hyperkalemia).",
+    onset: "5–15 min",
+    duration: "3–4 hours",
+    indications: ["Bronchospasms", "Known/suspected hyperkalemia with ECG changes"],
+    contraindications: ["Severe tachycardia"],
+    adverseEffects: ["Tachycardia", "Palpitations", "Tremors", "Anxiety", "Dysrhythmias"],
+    dosage: [
+      "MDI Adult/Peds: 2–4 sprays. Repeat PRN every 10 min.",
+      "Single-dose neb Adult/Peds ≥2y: 2.5 mg in 3 mL saline. Repeat PRN every 10 min.",
+      "Peds <2y: 1.5 mL (½ of 3 mL premix) + 2 mL saline. Repeat PRN every 10 min.",
+      "Continuous neb Adult: 3 premixed (2.5 mg/3 mL) = 7.5 mg in 9 mL. Peds: NOT ALLOWED."
+    ],
+    special: ["Can combine with Atrovent for initial treatment.", "β-blockers may antagonize Albuterol."]
+  },
+  {
+    id: "aspirin",
+    name: "Aspirin",
+    description: "Inhibits platelet aggregation and blood clotting; indicated for acute coronary syndrome.",
+    onset: "5–30 min",
+    duration: "3–6 hours",
+    indications: ["Suspected acute coronary syndrome"],
+    contraindications: ["Drug allergy", "Known GI bleed"],
+    adverseEffects: ["Rash", "GI ulcerations", "Abdominal pain", "Upset stomach", "Heartburn", "Drowsiness", "Headache", "Cramping", "Nausea", "Gastritis", "Bleeding"],
+    dosage: [
+      "Adult: 162–324 mg. Max dose 324 mg.",
+      "Pediatric: NOT ALLOWED."
+    ],
+    special: ["Patients on Warfarin can be administered aspirin.", "Plavix/other oral anticoagulants may still be given aspirin."]
+  },
+  {
+    id: "dextrose",
+    name: "Dextrose",
+    description: "Glucose regulation: insulin stores excess glucose; glucagon mobilizes stored glucose.",
+    onset: "1 minute",
+    duration: "Varies",
+    indications: ["Hypoglycemia (or blood glucose < 60 mg/dL)"],
+    contraindications: ["Intracranial/intraspinal hemorrhage with BGL ≥60 mg/dL (relative)", "Severe TBI with BGL ≥60 mg/dL"],
+    adverseEffects: ["Infiltration may cause necrosis"],
+    dosage: [
+      "Adult: D10 25 g (250 mL of 10%) IV/IO slowly over 10 min or until improved.",
+      "Peds <13y: D10 10 mL/kg IV/IO slowly over 10 min or until improved."
+    ],
+    special: [
+      "Newborn w/ hypoglycemia (BGL <40) consider breast feeding initially.",
+      "D10 preferred over D50.",
+      "Delayed effects in elderly/poor circulation or prolonged hypoglycemia.",
+      "If profound hypoglycemia and no IV, consider IO.",
+      "Flush with NS; monitor access patency.",
+      "If not transported, ensure complex carbs prior to release.",
+      "Repeat BGL every 1–30 min PRN."
+    ]
+  },
+  {
+    id: "epi_1_1000_im",
+    name: "Epinephrine 1:1,000 (IM ONLY)",
+    description: "Catecholamine with α and β effects.",
+    onset: "Immediate",
+    duration: "3–5 minutes",
+    indications: ["Anaphylaxis"],
+    contraindications: ["Hypovolemic and/or hemorrhagic shock"],
+    adverseEffects: ["Angina pectoris or myocardial infarction", "Anxiety", "Tremors", "Palpitations", "Headache"],
+    dosage: [
+      "Adult: 0.5 mg IM. Repeat PRN every 5 min.",
+      "Peds: 0.01 mg/kg IM. Max single dose 0.5 mg. Repeat PRN every 5 min."
+    ],
+    special: [
+      "Auto-injectors can be administered by all EMS personnel via standing order.",
+      "Patients >40 with previous cardiac disease should be reassessed often for cardiac compromise."
+    ]
+  },
+  {
+    id: "honey",
+    name: "Honey",
+    description: "Goal: create a barrier between mucous membranes and battery (especially esophagus).",
+    onset: "Immediate",
+    duration: "10–15 minutes",
+    indications: ["Suspected button battery ingestion ≤12 hours"],
+    contraindications: ["Inability to swallow/protect airway", "Age <12 months"],
+    adverseEffects: ["None"],
+    dosage: ["Adult/Peds ≥12 months: 10 mL (2 tsp) PO every 10 minutes. No max dose."],
+    special: ["Use commercial honey.", "Button batteries have high mortality; transport immediately.", "Do NOT induce vomiting."]
+  },
+  {
+    id: "ibuprofen",
+    name: "Ibuprofen",
+    description: "NSAID.",
+    onset: "30–60 minutes",
+    duration: "4–6 hours",
+    indications: ["Mild to moderate pain", "Frostbite or frozen extremity"],
+    contraindications: [
+      "Hypersensitivity",
+      "Current/recent GI disease and/or bleeding",
+      "ACS",
+      "Pregnancy",
+      "Patient on blood thinners (does not include Aspirin)",
+      "Children <6 months"
+    ],
+    adverseEffects: ["Bradycardia", "Oliguria", "Bronchospasms", "Angioedema", "May enhance hypoglycemia", "Blood thinning"],
+    dosage: [
+      "Adult: 600 mg PO. PRN every 6 hours.",
+      "Peds >6 months: 10 mg/kg PO. PRN every 6 hours. Max dose 600 mg."
+    ],
+    special: ["Use caution with renal disease."]
+  },
+  {
+    id: "ipratropium",
+    name: "Ipratropium Bromide (Atrovent)",
+    description: "Anticholinergic agent.",
+    onset: "3 minutes",
+    duration: "6 hours",
+    indications: [
+      "Adjunct bronchodilator for asthma",
+      "Chronic bronchitis",
+      "Allergy/Anaphylaxis",
+      "Emphysema not controlled by β agonist (e.g., Albuterol)"
+    ],
+    contraindications: ["Hypersensitivity"],
+    adverseEffects: ["Anticholinergic symptoms"],
+    dosage: [
+      "Adult: 0.5 mg with Albuterol in nebulizer. Repeat PRN every 15 min.",
+      "Peds: 0.25 mg with Albuterol in nebulizer. Repeat PRN every 15 min."
+    ],
+    special: ["Can combine with Albuterol initially.", "Safe with known/suspected peanut allergy."]
+  },
+  {
+    id: "iv_solutions",
+    name: "IV Solutions (Normal Saline)",
+    description: "Normal Saline is an isotonic solution and volume expander.",
+    onset: "Immediate",
+    duration: "Varies",
+    indications: ["Need to expand intravascular volume"],
+    contraindications: ["Use caution with high suspicion of fluid overload"],
+    adverseEffects: ["Fluid overload"],
+    dosage: [
+      "Hypovolemia Adult/Peds: 20 mL/kg. Repeat PRN until perfusion improved.",
+      "Hemorrhagic shock Adult/Peds: 10 mL/kg. Repeat PRN until distal pulses/mental status improved and/or permissive SBP 80–100.",
+      "Septic shock Adult/Peds: 30 mL/kg. Repeat PRN until perfusion improved.",
+      "Burn therapy Adult: 500 mL/hr; Peds ≥14y: 500 mL/hr; 5–13y: 250 mL/hr; <5y: 125 mL/hr.",
+      "Fluid challenge: 250–500 mL bolus with reassessment after each."
+    ],
+    special: ["Watch for pulmonary edema in cardiac compromised.", "Be cautious in elderly with renal insufficiency/CHF.", "Watch for IV/IO infiltration."]
+  },
+  {
+    id: "levalbuterol",
+    name: "LEValbuterol (Xopenex)",
+    description: "Short acting β-2 agonist; bronchodilator and positive chronotrope (less than Albuterol). Lowers serum potassium via intracellular shift.",
+    onset: "10–17 minutes",
+    duration: "5–6 hours",
+    indications: ["Bronchospasm"],
+    contraindications: ["Hypersensitivity to LEValbuterol or Albuterol", "Severe tachycardia (relative)"],
+    adverseEffects: ["Tachycardia", "Palpitations", "Tremors", "Anxiety", "Dysrhythmias"],
+    dosage: [
+      "MDI Adult/Peds: 2–4 sprays. Repeat PRN every 20 min.",
+      "Single-dose neb Adult: 0.042% (1.25 mg in 3 mL saline). Repeat PRN every 10 min up to 6 doses. MAX 7.5 mg. Not continuous.",
+      "Single-dose neb Peds: 0.042% (1.25 mg in 3 mL saline). Repeat PRN every 10 min up to 6 doses. MAX 3.75 mg. Not continuous."
+    ],
+    special: [
+      "Can combine with Atrovent initially.",
+      "β-blockers may antagonize LEValbuterol.",
+      "Consider in-line nebulized LEValbuterol for intubation/CPAP severe distress."
+    ]
+  },
+  {
+    id: "naloxone",
+    name: "Naloxone (Narcan)",
+    description: "Competitive receptor antagonist.",
+    onset: "5 minutes",
+    duration: "1–4 hours",
+    indications: ["Suspected opioid overdose", "Coma with impaired reflexes or respiratory depression"],
+    contraindications: ["Known hypersensitivity"],
+    adverseEffects: ["Tachycardia", "Nausea/vomiting", "Pulmonary edema"],
+    dosage: [
+      "Adult IV/IO/IM/IN: 0.5–1 mg bolus. Repeat PRN.",
+      "Adult IV drip: Add ½ initial arousal dose to 1,000 mL NS over 1 hour.",
+      "Peds ≥20 kg: 0.5 mg bolus IV/IO/IM/IN; titrate to effect up to 2 mg total.",
+      "Peds <20 kg: 0.01 mg/kg bolus IV/IO/IM/IN; titrate to effect up to 2 mg total.",
+      "Neonate: NOT ALLOWED."
+    ],
+    special: [
+      "Use only if respiratory depression/impaired airway reflexes are present.",
+      "Mild/moderate reversal NOT indicated (may cause violent withdrawals).",
+      "Transport for evaluation after Naloxone.",
+      "Use extreme caution in narcotic dependent patients.",
+      "Higher doses may be needed for synthetic opioids."
+    ]
+  },
+  {
+    id: "ondansetron",
+    name: "Ondansetron (Zofran)",
+    description: "Serotonin 5-HT3 receptor agent; prevents nausea/vomiting by blocking serotonin.",
+    onset: "IV/IO: 10 min; IM: 40 min; ODT/PO: 30 min",
+    duration: "4 hours",
+    indications: [
+      "Nausea/vomiting from medical or traumatic complaint",
+      "Prophylaxis for opioid pain management, CPAP, SMR",
+      "Prophylaxis for high motion sickness risk"
+    ],
+    contraindications: ["Allergy"],
+    adverseEffects: ["Headache", "Dizziness", "Drowsiness", "Fatigue", "Blurred vision"],
+    dosage: [
+      "Adult/Peds ≥40 kg: IV/IO/IM/ODT/PO/IN: 4 mg. Repeat PRN every 10 min up to 2 total doses.",
+      "Peds <40 kg: IV/IO/IM/PO/IN: 0.1 mg/kg. Repeat PRN every 10 min up to 2 total doses."
+    ],
+    special: ["Can pass through breast milk and may harm a nursing baby."]
+  },
+  {
+    id: "oral_glucose",
+    name: "Oral Glucose",
+    description: "Body fuel required for cellular metabolism; prompt increase in circulating blood sugar after GI absorption.",
+    onset: "1 minute",
+    duration: "Varies",
+    indications: ["Known/suspected hypoglycemia; able to swallow; patent airway"],
+    contraindications: ["Inability to swallow/protect airway", "Unable to take oral meds"],
+    adverseEffects: ["Nausea"],
+    dosage: ["Adult/Peds: 1–2 full tubes or 15–30 g buccal. Repeat PRN every 10 min."],
+    special: [
+      "Gel thickness: risk of airway obstruction/aspiration.",
+      "Other sugar sources acceptable; ensure AMS signs and consider other causes (hypoxia, stroke, seizure, alcohol intoxication, overdose)."
+    ]
+  },
+  {
+    id: "oxygen",
+    name: "Oxygen",
+    description: "Increases oxygen in blood and delivery to tissue. Respiration regulated mainly by acid-base/CO2; large O2 decreases stimulate breathing.",
+    onset: "Immediate",
+    duration: "Varies",
+    indications: ["Moderate to severe illness or traumatic injury with suspected hypoxia"],
+    contraindications: ["None"],
+    adverseEffects: ["Hyperoxemia"],
+    dosage: ["Adult/Peds: Titrate to maintain SpO2 90%–98% based on presentation/baseline."],
+    special: [
+      "Do not withhold oxygen from COPD patient due to hypoxic drive concerns.",
+      "Hyperoxemia can be detrimental in trauma, MI, stroke; monitor closely."
+    ]
+  },
+  {
+    id: "phenylephrine",
+    name: "Phenylephrine (Neosynephrine)",
+    description: "α-adrenergic agonist. IN use causes nasal mucosa vasoconstriction; decreases bleeding and decongestion.",
+    onset: "Rapid",
+    duration: "20 minutes",
+    indications: ["Nose bleed (epistaxis)"],
+    contraindications: ["Hypersensitivity"],
+    adverseEffects: [],
+    dosage: [
+      "Active nosebleed: have patient blow nose to expel clots. Administer 2 sprays each nostril while gently sniffing (if possible) until they can taste med.",
+      "Apply pressure/clip to soft nasal portion for 20 min. Repeat PRN."
+    ],
+    special: ["Avoid administration into eyes (dilates pupil but no damage)."]
+  },
+  {
+    id: "txa",
+    name: "Tranexamic Acid (TXA)",
+    description: "Inhibits activation of plasminogen; reduces conversion to plasmin, reducing fibrin clot breakdown.",
+    onset: "5–15 minutes",
+    duration: "3 hours",
+    indications: ["Epistaxis"],
+    contraindications: ["Epistaxis time >3 hours", "Known DVT or PE", "Allergy", "GI bleed"],
+    adverseEffects: ["Impaired color vision/visual disturbances", "Thrombotic events", "Nausea/vomiting", "Allergic reaction", "Hypotension", "Diarrhea"],
+    dosage: [
+      "Adult: 250 mg IN (soaked cotton ball/gauze).",
+      "Peds: 100 mg IN (soaked cotton ball/gauze)."
+    ],
+    special: ["Notify hospital TXA given.", "OK to give TXA and Neosynephrine same patient.", "Use caution in renal insufficiency."]
+  }
+];
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      const store = db.createObjectStore(STORE, { keyPath: "id" });
+      store.createIndex("name", "name", { unique: false });
+      store.createIndex("searchText", "searchText", { unique: false });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function tx(db, mode="readonly") {
+  return db.transaction(STORE, mode).objectStore(STORE);
+}
+
+function buildSearchText(m) {
+  const parts = [
+    m.name, m.description, m.onset, m.duration,
+    ...(m.indications || []),
+    ...(m.contraindications || []),
+    ...(m.adverseEffects || []),
+    ...(m.dosage || []),
+    ...(m.special || [])
+  ];
+  return parts.filter(Boolean).join(" | ").toLowerCase();
+}
+
+async function seedIfEmpty(db) {
+  const store = tx(db, "readonly");
+  const countReq = store.count();
+  const count = await new Promise((res, rej) => {
+    countReq.onsuccess = () => res(countReq.result);
+    countReq.onerror = () => rej(countReq.error);
+  });
+  if (count > 0) return false;
+
+  const wstore = tx(db, "readwrite");
+  for (const m of SEED) {
+    const doc = { ...m, searchText: buildSearchText(m) };
+    wstore.put(doc);
+  }
+  await new Promise((res, rej) => {
+    wstore.transaction.oncomplete = () => res(true);
+    wstore.transaction.onerror = () => rej(wstore.transaction.error);
+  });
+  return true;
+}
+
+async function getAll(db) {
+  const store = tx(db, "readonly");
+  const req = store.getAll();
+  return await new Promise((res, rej) => {
+    req.onsuccess = () => res(req.result || []);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+function render(list) {
+  const root = document.getElementById("results");
+  root.innerHTML = "";
+  if (!list.length) {
+    root.innerHTML = `<div class="card"><div class="name">No matches</div><div class="small">Try a different keyword.</div></div>`;
+    return;
+  }
+  for (const m of list) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="name">${escapeHtml(m.name)}</div>
+      <div class="small"><b>Onset:</b> ${escapeHtml(m.onset || "—")} &nbsp; <b>Duration:</b> ${escapeHtml(m.duration || "—")}</div>
+      <details>
+        <summary>Description</summary>
+        <div class="small">${escapeHtml(m.description || "")}</div>
+      </details>
+      <details>
+        <summary>Indications</summary>
+        <div class="small">${(m.indications||[]).map(x=>"- "+escapeHtml(x)).join("\n") || "—"}</div>
+      </details>
+      <details>
+        <summary>Contraindications</summary>
+        <div class="small">${(m.contraindications||[]).map(x=>"- "+escapeHtml(x)).join("\n") || "—"}</div>
+      </details>
+      <details>
+        <summary>Adverse Effects</summary>
+        <div class="small">${(m.adverseEffects||[]).map(x=>"- "+escapeHtml(x)).join("\n") || "—"}</div>
+      </details>
+      <details>
+        <summary>Dosage & Administration</summary>
+        <div class="small">${(m.dosage||[]).map(x=>"- "+escapeHtml(x)).join("\n") || "—"}</div>
+      </details>
+      <details>
+        <summary>Special Considerations</summary>
+        <div class="small">${(m.special||[]).map(x=>"- "+escapeHtml(x)).join("\n") || "—"}</div>
+      </details>
+    `;
+    root.appendChild(card);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function rankAndFilter(all, q) {
+  const query = q.trim().toLowerCase();
+  if (!query) return all.slice().sort((a,b)=>a.name.localeCompare(b.name));
+
+  const terms = query.split(/\s+/).filter(Boolean);
+  const scored = [];
+  for (const m of all) {
+    const text = m.searchText || "";
+    let score = 0;
+
+    // Boost name hits
+    const name = (m.name || "").toLowerCase();
+    for (const t of terms) {
+      if (name.includes(t)) score += 10;
+      if (text.includes(t)) score += 2;
+    }
+
+    // Phrase boost
+    if (text.includes(query)) score += 6;
+
+    if (score > 0) scored.push([score, m]);
+  }
+  scored.sort((a,b)=>b[0]-a[0] || a[1].name.localeCompare(b[1].name));
+  return scored.map(x=>x[1]);
+}
+
+(async function main() {
+  const status = document.getElementById("status");
+  const q = document.getElementById("q");
+  const db = await openDb();
+  const seeded = await seedIfEmpty(db);
+  status.textContent = seeded ? "Database created (seeded)" : "Database ready";
+
+  let all = await getAll(db);
+  all = all.map(m => ({...m, searchText: m.searchText || buildSearchText(m)}));
+
+  const update = () => render(rankAndFilter(all, q.value));
+  q.addEventListener("input", update);
+  update();
+})();
+</script>
+</body>
+</html>
